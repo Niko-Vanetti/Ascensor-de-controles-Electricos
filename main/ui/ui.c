@@ -215,9 +215,11 @@ static void make_door(lv_obj_t *parent, int x, int y, int w, int h, uint32_t acc
     int ih = h - 6;
     d->left = door_leaf(f, ih);
     d->right = door_leaf(f, ih);
-    d->target = false;
+    elevator_state_t state;
+    elevator_get_state(&state);
+    d->target = state.doors_open && !state.doors_closing;
     d->used = true;
-    door_apply(d, 0);                     /* arranca cerrada */
+    door_apply(d, d->target ? 100 : 0);
 }
 
 /* Lanza la animacion hacia abierta/cerrada solo si cambia el destino. */
@@ -421,12 +423,15 @@ static void snd_toggle_cb(lv_event_t *e)
 }
 
 static void rotate_async(void *unused);
+static bool s_rotate_pending;
 
 static void rot_cb(lv_event_t *e)
 {
     (void)e;
     /* No se reconstruye la UI dentro del propio evento del boton */
-    lv_async_call(rotate_async, NULL);
+    if (!s_rotate_pending) {
+        s_rotate_pending = lv_async_call(rotate_async, NULL) == LV_RES_OK;
+    }
 }
 
 /* Boton de giro 90 grados (vertical <-> horizontal); esta en TODAS las pantallas */
@@ -659,20 +664,28 @@ static void create_interior(lv_obj_t *scr)
                                "", &F66, INT_ACCENT, LV_TEXT_ALIGN_CENTER);
     s_int_dir = make_label(scr, cx, LAND ? 285 : 325, cw, 32, "", &F21, INT_ACCENT,
                            LV_TEXT_ALIGN_CENTER);
-    make_door(scr, LAND ? 322 : 452, LAND ? 150 : 175, 100, 96, INT_ACCENT);
     make_label(scr, LAND ? 450 : 40, LAND ? 90 : 394, LAND ? 534 : 520, 36,
                "¿A qué piso quieres ir?", &F30, TEC_TEXT, LV_TEXT_ALIGN_CENTER);
 
-    s_int_grid = make_panel(scr, LAND ? 456 : 44, LAND ? 140 : 454, 512, LAND ? 400 : 416);
+    s_int_grid = make_panel(scr, LAND ? 456 : 44, LAND ? 140 : 454, 512, LAND ? 400 : 320);
     lv_obj_set_style_bg_opa(s_int_grid, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_int_grid, 0, 0);
     lv_obj_add_flag(s_int_grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_int_grid, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_int_grid, LV_SCROLLBAR_MODE_OFF);
 
-    s_int_status = make_label(scr, cx, LAND ? 340 : 895, cw, LAND ? 70 : 24,
+    lv_obj_t *status = lv_obj_create(scr);
+    lv_obj_remove_style_all(status);
+    lv_obj_set_pos(status, cx, LAND ? 340 : 786);
+    lv_obj_set_size(status, cw, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(status, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(status, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(status, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(status, 8, 0);
+    s_int_status = make_label(status, 0, 0, cw, LV_SIZE_CONTENT,
                               "Toca el piso al que quieres ir: la cabina lo agrega a su ruta.",
                               &F19, INT_MUTED, LV_TEXT_ALIGN_CENTER);
+    make_door(status, 0, 0, 100, 96, INT_ACCENT);
     make_footer(scr, 1, INT_ACCENT);
 }
 
@@ -1364,8 +1377,13 @@ esp_err_t ui_create(void)
 }
 
 /* Gira la pantalla y reconstruye la UI. Con el mutex de LVGL tomado. */
-static void apply_orientation(bool land)
+static bool apply_orientation(bool land)
 {
+    lv_obj_t *transition = lv_obj_create(NULL);
+    if (transition == NULL) {
+        return false;
+    }
+
     if (s_msgbox != NULL) {
         lv_msgbox_close(s_msgbox);
         s_msgbox = NULL;
@@ -1373,6 +1391,15 @@ static void apply_orientation(bool land)
     lv_obj_t *act = lv_scr_act();
     int which = act == s_scr_blocks ? 3 : act == s_scr_overview ? 4 : s_cur_scr;
     lv_obj_t *old[5] = { s_scr[0], s_scr[1], s_scr[2], s_scr_blocks, s_scr_overview };
+
+    /* Libera las vistas anteriores antes de reservar las de la nueva orientacion. */
+    lv_scr_load(transition);
+    for (int i = 0; i < s_door_n; i++) {
+        lv_anim_del(&s_door[i], door_anim_cb);
+    }
+    for (int i = 0; i < 5; i++) {
+        lv_obj_del(old[i]);
+    }
 
     s_land = land;
     board_set_landscape(land);
@@ -1382,17 +1409,19 @@ static void apply_orientation(bool land)
     build_all();
     lv_obj_t *nw[5] = { s_scr[0], s_scr[1], s_scr[2], s_scr_blocks, s_scr_overview };
     lv_scr_load(nw[which]);
-    for (int i = 0; i < 5; i++) {
-        lv_obj_del(old[i]);
-    }
+    lv_obj_del(transition);
+    return true;
 }
 
 static void rotate_async(void *unused)
 {
     (void)unused;
+    s_rotate_pending = false;
     app_state_t *app = app_state();
     audio_play(AUDIO_SND_SWIPE_NEXT);
-    apply_orientation(!s_land);
+    if (!apply_orientation(!s_land)) {
+        return;
+    }
     app->cfg.landscape = s_land;
     storage_save_config(&app->cfg);
     ui_refresh();
@@ -1487,15 +1516,29 @@ void ui_refresh(void)
     lv_obj_set_style_text_color(s_ext_arrow, lv_color_hex(COL_OK), 0);
 
     /* Interior */
-    if (st.position_known) {
+    bool moving = st.moving && !st.fault;
+    const char *interior_dir = dir_txt;
+    const lv_font_t *position_font = &F30;
+    if (moving) {
+        bool up = st.dir == ELEV_DIR_UP;
+        bool down = st.dir == ELEV_DIR_DOWN;
+        snprintf(buf, sizeof(buf), "%s", up ? LV_SYMBOL_UP : down ? LV_SYMBOL_DOWN : "EN VIAJE");
+        position_font = (up || down) ? &lv_font_montserrat_48 : &F30;
+        interior_dir = up ? "SUBIENDO" : down ? "BAJANDO" : "EN MOVIMIENTO";
+    } else if (st.position_known && !st.fault) {
         snprintf(buf, sizeof(buf), "P%02u", st.current_floor);
+        position_font = &F66;
     } else {
-        snprintf(buf, sizeof(buf), "--");
+        snprintf(buf, sizeof(buf), "SIN POSICIÓN");
+    }
+    if (lv_obj_get_style_text_font(s_int_current, LV_PART_MAIN) != position_font) {
+        lv_obj_set_style_text_font(s_int_current, position_font, LV_PART_MAIN);
     }
     set_txt(s_int_current, buf);
-    set_txt(s_int_dir, dir_txt);
+    set_txt(s_int_dir, interior_dir);
     update_floor_button_states(&st);
     set_txt(s_int_status, st.fault ? "Fallo de sensores" :
+            moving ? "Cabina en movimiento." :
             st.position_known ? "Toca un piso para solicitarlo." :
                                 "Posici\xC3\xB3n sin confirmar: espera un sensor de piso.");
     s_last_state = st;

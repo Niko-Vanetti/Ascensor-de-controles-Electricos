@@ -46,7 +46,7 @@ Las exteriores del sentido contrario se conservan para el regreso, salvo en
 el extremo del recorrido pendiente, donde puede invertirse el sentido.
 
 No se admiten BAJAR en el piso inferior ni SUBIR en el superior. Un pedido en
-el piso actual detenido vuelve a iniciar el tiempo de puertas. Se conserva el
+el piso actual detenido deja intacta la cuenta de una salida programada. Se conserva el
 sentido entre paradas para continuar la recogida. La vista **Técnica → Ver pisos**
 es desplazable y muestra todos los pisos, sensor asignado, cabina confirmada y
 llamadas C/S/B. La botonera interior también distingue posición y pedidos.
@@ -57,6 +57,12 @@ Sin un sensor confirmado no se inicia una ruta. Varios sensores simultáneos
 registran un fallo retenido, detienen la lógica de movimiento y ponen las reglas
 en reposo. Corregir las señales, desactivar bloques y reaplicar configuración para
 reinicializar. Entre pisos no se inventa una posición.
+
+La pantalla arranca con las puertas dibujadas abiertas. La primera solicitud
+desde una parada inicia una espera de 3 s. Al llegar a una parada solicitada,
+se abren las puertas y, si quedan solicitudes, inicia otra espera de 3 s.
+La animación de cierre comienza durante los últimos 700 ms de cada espera.
+En la última parada las puertas permanecen abiertas hasta la próxima solicitud.
 
 ## Qué falta respecto a un ascensor real
 
@@ -136,6 +142,13 @@ Se deduce el valor 0 porque el editor muestra los siete bloques activos y el
 motor exige el mismo reposo en todos los bloques que comparten un GPIO.
 El reposo 0 se ve directamente en el bloque 1 para GPIO 52 y en el 6 para
 GPIO 51.
+
+En una CrowPanel sin configuración guardada, el firmware arranca con tres
+pisos y estos siete bloques activos. Los bloques guardados en NVS, incluso
+una lista vacía, tienen prioridad. Si ya hay una configuración de tres pisos
+pero falta la lista de bloques, se precargan los siete y se respeta el
+estado guardado del interruptor. Los GPIO y niveles de los sensores de piso
+se configuran en Técnica.
 
 La botonera de cabina y las llamadas exteriores comparten una salida por
 piso. En el piso 1, **CABINA** o **SUBIR** activan GPIO 52. En el piso 2,

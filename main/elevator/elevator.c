@@ -20,7 +20,7 @@
 
 static const char *TAG = "ASCENSOR";
 
-#define DOORS_OPEN_MS       3000   /* puertas abiertas */
+#define STOP_DWELL_MS       3000   /* tiempo total de parada antes de salir */
 #define DOORS_CLOSE_MS      700    /* tramo final del ciclo: animacion de cierre */
 #define SENSOR_FILTER_MS    30
 
@@ -35,6 +35,7 @@ static bool s_has_target;
 static uint8_t s_target;
 
 static uint32_t s_doors_deadline_ms;
+static bool s_departure_scheduled;
 
 /* Filtrado de sensores */
 static bool     s_sensor_raw[ELEVATOR_MAX_FLOORS];
@@ -68,14 +69,22 @@ static void emit(elevator_event_type_t type, uint8_t floor, const char *msg)
 
 static void open_doors(void)
 {
-    s_doors_deadline_ms = now_ms() + DOORS_OPEN_MS;
-    s_state.doors_closing = false;   /* si se estaba cerrando, vuelve a abrir */
+    s_departure_scheduled = false;
+    s_state.doors_closing = false;
     if (!s_state.doors_open) {
         s_state.doors_open = true;
-        s_doors_deadline_ms = now_ms() + DOORS_OPEN_MS;
         emit(ELEV_EVT_DOORS, s_state.current_floor,
              "Puertas abiertas: ya puedes entrar o salir.");
         ESP_LOGI(TAG, "Llegada a P%02u - cabina detenida.", s_state.current_floor);
+    }
+}
+
+static void schedule_departure(uint32_t now)
+{
+    if (!s_departure_scheduled && s_state.doors_open &&
+        !s_state.fault && s_state.position_known && elevator_has_pending()) {
+        s_doors_deadline_ms = now + STOP_DWELL_MS;
+        s_departure_scheduled = true;
     }
 }
 
@@ -164,11 +173,8 @@ static void plan_next(void)
         return;
     }
 
-    /* En modo real no se puede planificar sin posicion confirmada */
-    if (!s_state.position_known) {
-        return;
-    }
-
+    /* El temporizador ya se inició en un piso confirmado. El sensor puede
+     * quedar inactivo antes que el temporizador de la interfaz al salir. */
     uint8_t cur = s_state.current_floor;
 
     if (s_pending[cur - 1] && (s_state.dir == ELEV_DIR_IDLE || should_stop(cur))) {
@@ -182,6 +188,7 @@ static void plan_next(void)
     int t = pick_target();
     if (t < 0) {
         s_state.dir = ELEV_DIR_IDLE;
+        open_doors();
         return;
     }
 
@@ -306,13 +313,14 @@ esp_err_t elevator_init(const elevator_config_t *cfg)
     memset(s_button_seen, 0, sizeof(s_button_seen));
     s_has_target = false;
     s_target = 0;
+    s_departure_scheduled = false;
 
     s_state.floors      = cfg->floors;
     s_state.demo_mode   = false;
     s_state.current_floor = 1;
     s_state.position_known = false;
     s_state.dir = ELEV_DIR_IDLE;
-    s_state.doors_open = false;
+    s_state.doors_open = true;
 
     for (int f = 0; f < s_cfg.floors; f++) {
         uint8_t pin = s_cfg.floor_gpio[f];
@@ -344,7 +352,6 @@ esp_err_t elevator_reload(const elevator_config_t *cfg)
     if (err == ESP_OK) {
         s_state.current_floor = (keep.current_floor <= cfg->floors)
                                 ? keep.current_floor : 1;
-        s_state.doors_open = keep.doors_open;
     }
     return err;
 }
@@ -391,9 +398,6 @@ esp_err_t elevator_call(uint8_t floor, elevator_dir_t dir)
     s_button_until[button][floor-1] = now_ms() + 300;
     if (floor == s_state.current_floor && s_state.position_known && !s_state.moving) {
         emit(ELEV_EVT_REJECTED, floor, "La cabina ya est\xC3\xA1 en este piso.");
-        if (s_state.position_known) {
-            open_doors();
-        }
         return ESP_OK;
     }
 
@@ -413,7 +417,7 @@ esp_err_t elevator_call(uint8_t floor, elevator_dir_t dir)
         emit(ELEV_EVT_MOVING, floor, msg);
     }
 
-    plan_next();
+    schedule_departure(now_ms());
     return ESP_OK;
 }
 
@@ -438,22 +442,27 @@ void elevator_tick(void)
 {
     uint32_t now = now_ms();
     read_sensors();
+    if (s_state.fault) {
+        return;
+    }
+    schedule_departure(now);
+    if (!s_departure_scheduled) {
+        return;
+    }
 
-    if (s_state.doors_open && !s_state.doors_closing &&
+    if (!s_state.doors_closing &&
         (int32_t)(s_doors_deadline_ms - now) <= DOORS_CLOSE_MS) {
         /* ultimos 700 ms: la puerta se cierra; la cabina no sale hasta terminar */
         s_state.doors_closing = true;
         emit(ELEV_EVT_DOORS, s_state.current_floor, "Cerrando puertas...");
     }
 
-    if (s_state.doors_open && (int32_t)(now - s_doors_deadline_ms) >= 0) {
+    if ((int32_t)(now - s_doors_deadline_ms) >= 0) {
+        s_departure_scheduled = false;
         s_state.doors_open = false;
         s_state.doors_closing = false;
         emit(ELEV_EVT_DOORS, s_state.current_floor, "Puertas cerradas.");
         plan_next();
     }
 
-    if (!s_state.moving && !s_state.doors_open && elevator_has_pending()) {
-        plan_next();
-    }
 }

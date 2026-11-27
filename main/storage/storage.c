@@ -62,10 +62,9 @@ esp_err_t storage_load_config(elevator_config_t *cfg)
     }
     storage_defaults(cfg);
 
-    nvs_handle_t h = open_ns(NVS_READONLY);
-    if (h == 0) {
-        return ESP_ERR_NVS_NOT_FOUND;
-    }
+    nvs_handle_t h;
+    esp_err_t open_rc = nvs_open(STORAGE_NS_ELEVATOR, NVS_READONLY, &h);
+    if (open_rc != ESP_OK) return open_rc;
 
     uint8_t u8 = 0;
     if (nvs_get_u8(h, STORAGE_KEY_FLOORS, &u8) == ESP_OK) {
@@ -163,10 +162,11 @@ esp_err_t storage_load_blocks(struct rule_block_s *blocks, size_t *count)
         return ESP_ERR_INVALID_ARG;
     }
 
-    nvs_handle_t h = open_ns(NVS_READONLY);
-    if (h == 0) {
+    nvs_handle_t h;
+    esp_err_t open_rc = nvs_open(STORAGE_NS_ELEVATOR, NVS_READONLY, &h);
+    if (open_rc != ESP_OK) {
         *count = 0;
-        return ESP_ERR_NVS_NOT_FOUND;
+        return open_rc;
     }
 
     typedef struct {
@@ -176,7 +176,12 @@ esp_err_t storage_load_blocks(struct rule_block_s *blocks, size_t *count)
     } legacy_block_t;
     char schema[16] = {0};
     size_t schema_len = sizeof(schema);
-    nvs_get_str(h, STORAGE_KEY_RULES_VER, schema, &schema_len);
+    esp_err_t schema_rc = nvs_get_str(h, STORAGE_KEY_RULES_VER, schema, &schema_len);
+    if (schema_rc != ESP_OK && schema_rc != ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(h);
+        *count = 0;
+        return schema_rc;
+    }
     if (schema[0] && strcmp(schema, "rules_v1") != 0 &&
         strcmp(schema, STORAGE_RULES_VERSION) != 0) {
         nvs_close(h); *count = 0; return ESP_ERR_INVALID_STATE;
@@ -186,7 +191,11 @@ esp_err_t storage_load_blocks(struct rule_block_s *blocks, size_t *count)
         size_t bytes = sizeof(old);
         esp_err_t rc = nvs_get_blob(h, STORAGE_KEY_BLOCKS, old, &bytes);
         nvs_close(h);
-        if (rc != ESP_OK || bytes % sizeof(old[0]) || bytes / sizeof(old[0]) > *count) {
+        if (rc != ESP_OK) {
+            *count = 0;
+            return rc;
+        }
+        if (bytes % sizeof(old[0]) || bytes / sizeof(old[0]) > *count) {
             *count = 0;
             return ESP_ERR_INVALID_SIZE;
         }

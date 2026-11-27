@@ -9,12 +9,39 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "nvs.h"
 
 #define APP_ERR_MAX 160
 
 static const char *TAG = "APP";
 
 static app_state_t s_app;
+
+static void load_default_button_blocks(void)
+{
+    static const struct {
+        rule_source_t source;
+        uint8_t floor;
+        uint8_t gpio;
+    } buttons[] = {
+        { RULE_BUTTON_CABIN, 1, 52 },
+        { RULE_BUTTON_CABIN, 2, 51 },
+        { RULE_BUTTON_CABIN, 3, 50 },
+        { RULE_BUTTON_UP,    1, 52 },
+        { RULE_BUTTON_DOWN,  3, 50 },
+        { RULE_BUTTON_UP,    2, 51 },
+        { RULE_BUTTON_DOWN,  2, 51 },
+    };
+
+    s_app.block_count = sizeof(buttons) / sizeof(buttons[0]);
+    for (size_t i = 0; i < s_app.block_count; i++) {
+        rule_block_t *block = &s_app.blocks[i];
+        rules_block_defaults(block);
+        block->source = buttons[i].source;
+        block->floor = buttons[i].floor;
+        block->out_gpio = buttons[i].gpio;
+    }
+}
 
 app_state_t *app_state(void)
 {
@@ -25,13 +52,19 @@ esp_err_t app_load(void)
 {
     memset(&s_app, 0, sizeof(s_app));
 
-    storage_load_config(&s_app.cfg);
-
+    esp_err_t config_rc = storage_load_config(&s_app.cfg);
     size_t capacity = RULES_MAX_BLOCKS;
-    if (storage_load_blocks(s_app.blocks, &capacity) != ESP_OK) {
-        s_app.block_count = 0;
-    } else {
+    esp_err_t blocks_rc = storage_load_blocks(s_app.blocks, &capacity);
+    if (blocks_rc == ESP_OK) {
         s_app.block_count = capacity;
+    } else if (blocks_rc == ESP_ERR_NVS_NOT_FOUND) {
+        if (config_rc == ESP_ERR_NVS_NOT_FOUND) {
+            s_app.cfg.floors = 3;
+            s_app.cfg.blocks_enabled = true;
+            load_default_button_blocks();
+        } else if (config_rc == ESP_OK && s_app.cfg.floors == 3) {
+            load_default_button_blocks();
+        }
     }
 
     ESP_ERROR_CHECK(elevator_init(&s_app.cfg));
